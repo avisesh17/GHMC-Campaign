@@ -1,0 +1,330 @@
+import React, { useState, useEffect } from 'react'
+import {
+  View, Text, StyleSheet, ScrollView, TouchableOpacity,
+  TextInput, ActivityIndicator, Alert
+} from 'react-native'
+import * as Location from 'expo-location'
+import { useAuthStore }  from '../../store/authStore'
+import { api }           from '../../services/api'
+
+const OUTCOMES     = ['contacted', 'not_home', 'refused', 'not_found'] as const
+const SUPPORT      = ['supporter', 'neutral', 'opposition', 'unknown']  as const
+const SCOPE        = ['voter', 'family', 'house']                       as const
+const CONTACT_MODE = ['door_to_door', 'phone', 'event']                 as const
+
+const ISSUE_CATEGORIES = [
+  { key: 'roads',        label: 'Roads',      emoji: '🛣️' },
+  { key: 'water',        label: 'Water',      emoji: '💧' },
+  { key: 'drainage',     label: 'Drainage',   emoji: '🚿' },
+  { key: 'parking',      label: 'Parking',    emoji: '🅿️' },
+  { key: 'streetlights', label: 'Lights',     emoji: '💡' },
+  { key: 'parks',        label: 'Parks',      emoji: '🌳' },
+  { key: 'garbage',      label: 'Garbage',    emoji: '🗑️' },
+  { key: 'civic',        label: 'Civic',      emoji: '🏛️' },
+  { key: 'admin',        label: 'Admin',      emoji: '📋' },
+  { key: 'encroachment', label: 'Encroach.',  emoji: '🏗️' },
+  { key: 'transport',    label: 'Transport',  emoji: '🚌' },
+  { key: 'other',        label: 'Other',      emoji: '➕' },
+]
+
+const SEVERITY_OPTIONS = [
+  { key: 'high',   label: 'High',   bg: '#FCEBEB', fg: '#791F1F', border: '#E24B4A' },
+  { key: 'medium', label: 'Medium', bg: '#FAEEDA', fg: '#633806', border: '#BA7517' },
+  { key: 'low',    label: 'Low',    bg: '#E1F5EE', fg: '#085041', border: '#1D9E75' },
+]
+
+const C = {
+  primary: '#1D9E75', bg: '#FFFFFF', surface: '#F5F5F0',
+  border: '#E0DED6', text: '#1A1A18', muted: '#6B6B66',
+}
+
+export function LogVisitScreen({ route, navigation }: any) {
+  const { voterId, voterName, householdId, campaignId } = route.params || {}
+
+  const [scope,         setScope]         = useState<typeof SCOPE[number]>('voter')
+  const [outcome,       setOutcome]       = useState<typeof OUTCOMES[number]>('contacted')
+  const [support,       setSupport]       = useState<typeof SUPPORT[number]>('supporter')
+  const [contactMode,   setContactMode]   = useState<typeof CONTACT_MODE[number]>('door_to_door')
+  const [selectedIssues,setSelectedIssues]= useState<Set<string>>(new Set())
+  const [severity,      setSeverity]      = useState<'high'|'medium'|'low'>('medium')
+  const [notes,         setNotes]         = useState('')
+  const [followUpDate,  setFollowUpDate]  = useState('')
+  const [gps,           setGps]          = useState<{lat:number,lng:number}|null>(null)
+  const [submitting,    setSubmitting]    = useState(false)
+  const [pendingCount,  setPendingCount]  = useState(0)
+
+  useEffect(() => {
+    // Capture GPS on mount
+    ;(async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync()
+      if (status === 'granted') {
+        const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced })
+        setGps({ lat: loc.coords.latitude, lng: loc.coords.longitude })
+      }
+    })()
+    setPendingCount(api.getPendingCount())
+  }, [])
+
+  const toggleIssue = (key: string) => {
+    setSelectedIssues(prev => {
+      const next = new Set(prev)
+      next.has(key) ? next.delete(key) : next.add(key)
+      return next
+    })
+  }
+
+  const handleSubmit = async () => {
+    setSubmitting(true)
+    try {
+      const payload: any = {
+        campaign_id:    campaignId,
+        scope,
+        outcome,
+        contact_method: contactMode,
+        notes:          notes.trim() || undefined,
+        lat:            gps?.lat,
+        lng:            gps?.lng,
+        visited_at:     new Date().toISOString(),
+      }
+      if (voterId)    payload.voter_id     = voterId
+      if (householdId) payload.household_id = householdId
+      if (outcome === 'contacted') payload.support_given = support
+      if (outcome === 'not_home' && followUpDate) payload.follow_up_date = followUpDate
+
+      if (selectedIssues.size > 0) {
+        payload.issues = [...selectedIssues].map(cat => ({ category: cat, severity }))
+      }
+
+      const result = await api.logVisit(payload)
+
+      navigation.navigate('VisitSuccess', {
+        offline:         result.offline,
+        voterName,
+        outcome,
+        support:         outcome === 'contacted' ? support : null,
+        issueCount:      selectedIssues.size,
+      })
+    } catch (err: any) {
+      Alert.alert('Error', err.response?.data?.error || 'Failed to submit. Please try again.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <View style={s.container}>
+      {/* Header */}
+      <View style={s.header}>
+        <TouchableOpacity onPress={() => navigation.goBack()}>
+          <Text style={s.back}>← Back</Text>
+        </TouchableOpacity>
+        <Text style={s.headerTitle} numberOfLines={1}>
+          Log visit{voterName ? ` — ${voterName}` : ''}
+        </Text>
+        {pendingCount > 0 && (
+          <View style={s.offlineBadge}>
+            <Text style={s.offlineBadgeText}>{pendingCount} queued</Text>
+          </View>
+        )}
+      </View>
+
+      <ScrollView style={s.scroll} contentContainerStyle={s.scrollContent}
+        keyboardShouldPersistTaps="handled">
+
+        {/* Scope */}
+        <Text style={s.sectionLabel}>VISIT SCOPE</Text>
+        <View style={s.segmentRow}>
+          {SCOPE.map(sc => (
+            <TouchableOpacity key={sc} style={[s.segment, scope === sc && s.segmentActive]}
+              onPress={() => setScope(sc)}>
+              <Text style={[s.segmentText, scope === sc && s.segmentTextActive]}>
+                {sc === 'voter' ? 'This voter' : sc === 'family' ? 'Family unit' : 'Whole house'}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {/* Outcome */}
+        <Text style={s.sectionLabel}>OUTCOME</Text>
+        <View style={s.grid2}>
+          {OUTCOMES.map(o => (
+            <TouchableOpacity key={o} style={[s.optBtn, outcome === o && s.optBtnActive]}
+              onPress={() => setOutcome(o)}>
+              <Text style={[s.optBtnText, outcome === o && s.optBtnTextActive]}>
+                {o.replace('_',' ').replace(/\b\w/g, c => c.toUpperCase())}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {/* Support level (only when contacted) */}
+        {outcome === 'contacted' && (
+          <>
+            <Text style={s.sectionLabel}>SUPPORT LEVEL</Text>
+            <View style={s.grid2}>
+              {SUPPORT.map(sp => {
+                const colors = {
+                  supporter: { bg: '#E1F5EE', fg: '#085041', border: '#1D9E75' },
+                  neutral:   { bg: '#FAEEDA', fg: '#633806', border: '#BA7517' },
+                  opposition:{ bg: '#FCEBEB', fg: '#791F1F', border: '#E24B4A' },
+                  unknown:   { bg: '#F1EFE8', fg: '#444441', border: '#888780' },
+                }[sp]!
+                return (
+                  <TouchableOpacity key={sp}
+                    style={[s.optBtn, support === sp && { backgroundColor: colors.bg, borderColor: colors.border }]}
+                    onPress={() => setSupport(sp)}>
+                    <Text style={[s.optBtnText, support === sp && { color: colors.fg, fontWeight: '600' }]}>
+                      {sp.charAt(0).toUpperCase() + sp.slice(1)}
+                    </Text>
+                  </TouchableOpacity>
+                )
+              })}
+            </View>
+          </>
+        )}
+
+        {/* Contact method */}
+        <Text style={s.sectionLabel}>CONTACT METHOD</Text>
+        <View style={s.segmentRow}>
+          {CONTACT_MODE.map(m => (
+            <TouchableOpacity key={m} style={[s.segment, contactMode === m && s.segmentActive]}
+              onPress={() => setContactMode(m)}>
+              <Text style={[s.segmentText, contactMode === m && s.segmentTextActive]}>
+                {m.replace('_',' ').replace(/\b\w/g, c => c.toUpperCase())}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {/* Follow-up date (when not home) */}
+        {(outcome === 'not_home' || outcome === 'refused') && (
+          <>
+            <Text style={s.sectionLabel}>FOLLOW-UP DATE (OPTIONAL)</Text>
+            <TextInput
+              style={s.textInput}
+              value={followUpDate}
+              onChangeText={setFollowUpDate}
+              placeholder="YYYY-MM-DD e.g. 2026-03-18"
+              placeholderTextColor={C.muted}
+            />
+          </>
+        )}
+
+        {/* Civic issues */}
+        <Text style={s.sectionLabel}>CIVIC ISSUES RAISED</Text>
+        <View style={s.issueGrid}>
+          {ISSUE_CATEGORIES.map(ic => (
+            <TouchableOpacity key={ic.key}
+              style={[s.issueBtn, selectedIssues.has(ic.key) && s.issueBtnActive]}
+              onPress={() => toggleIssue(ic.key)}>
+              <Text style={s.issueEmoji}>{ic.emoji}</Text>
+              <Text style={[s.issueLabel, selectedIssues.has(ic.key) && s.issueLabelActive]}>
+                {ic.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {/* Severity (shown when issues selected) */}
+        {selectedIssues.size > 0 && (
+          <>
+            <Text style={s.sectionLabel}>ISSUE SEVERITY</Text>
+            <View style={s.sevRow}>
+              {SEVERITY_OPTIONS.map(sv => (
+                <TouchableOpacity key={sv.key}
+                  style={[s.sevBtn, severity === sv.key && { backgroundColor: sv.bg, borderColor: sv.border }]}
+                  onPress={() => setSeverity(sv.key as any)}>
+                  <Text style={[s.sevText, severity === sv.key && { color: sv.fg, fontWeight: '600' }]}>
+                    {sv.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </>
+        )}
+
+        {/* Notes */}
+        <Text style={s.sectionLabel}>NOTES</Text>
+        <TextInput
+          style={[s.textInput, s.notesInput]}
+          value={notes}
+          onChangeText={setNotes}
+          placeholder="Any issues, preferences or special notes..."
+          placeholderTextColor={C.muted}
+          multiline
+          numberOfLines={3}
+          textAlignVertical="top"
+        />
+
+        {/* GPS status */}
+        <View style={s.gpsRow}>
+          <View style={[s.gpsDot, { backgroundColor: gps ? C.primary : '#BA7517' }]} />
+          <Text style={s.gpsText}>
+            {gps
+              ? `GPS captured · ${gps.lat.toFixed(4)}°N, ${gps.lng.toFixed(4)}°E`
+              : 'Acquiring GPS...'}
+          </Text>
+        </View>
+
+        {/* Submit */}
+        <TouchableOpacity style={[s.submitBtn, submitting && s.submitDisabled]}
+          onPress={handleSubmit} disabled={submitting}>
+          {submitting
+            ? <ActivityIndicator color="#fff" />
+            : <Text style={s.submitText}>Submit visit</Text>
+          }
+        </TouchableOpacity>
+
+        <View style={{ height: 40 }} />
+      </ScrollView>
+    </View>
+  )
+}
+
+const s = StyleSheet.create({
+  container:          { flex: 1, backgroundColor: C.bg },
+  header:             { flexDirection: 'row', alignItems: 'center', padding: 14, paddingTop: 52,
+                        borderBottomWidth: 0.5, borderColor: C.border, gap: 8 },
+  back:               { color: '#185FA5', fontSize: 14 },
+  headerTitle:        { flex: 1, fontSize: 14, fontWeight: '600', color: C.text },
+  offlineBadge:       { backgroundColor: '#FAEEDA', paddingHorizontal: 8, paddingVertical: 3,
+                        borderRadius: 10 },
+  offlineBadgeText:   { fontSize: 10, color: '#633806', fontWeight: '600' },
+  scroll:             { flex: 1 },
+  scrollContent:      { padding: 16 },
+  sectionLabel:       { fontSize: 10, fontWeight: '600', color: C.muted, letterSpacing: 0.8,
+                        marginBottom: 8, marginTop: 16 },
+  segmentRow:         { flexDirection: 'row', borderWidth: 0.5, borderColor: C.border,
+                        borderRadius: 10, overflow: 'hidden', marginBottom: 4 },
+  segment:            { flex: 1, padding: 9, alignItems: 'center' },
+  segmentActive:      { backgroundColor: '#E1F5EE' },
+  segmentText:        { fontSize: 12, color: C.muted },
+  segmentTextActive:  { color: '#085041', fontWeight: '600' },
+  grid2:              { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 4 },
+  optBtn:             { flex: 1, minWidth: '45%', padding: 10, borderWidth: 0.5, borderColor: C.border,
+                        borderRadius: 10, alignItems: 'center' },
+  optBtnActive:       { backgroundColor: '#E1F5EE', borderColor: '#1D9E75' },
+  optBtnText:         { fontSize: 12, color: C.muted },
+  optBtnTextActive:   { color: '#085041', fontWeight: '600' },
+  issueGrid:          { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  issueBtn:           { width: '30%', paddingVertical: 10, borderWidth: 0.5, borderColor: C.border,
+                        borderRadius: 10, alignItems: 'center' },
+  issueBtnActive:     { backgroundColor: '#E1F5EE', borderColor: '#1D9E75' },
+  issueEmoji:         { fontSize: 18 },
+  issueLabel:         { fontSize: 10, color: C.muted, marginTop: 3 },
+  issueLabelActive:   { color: '#085041', fontWeight: '500' },
+  sevRow:             { flexDirection: 'row', gap: 8 },
+  sevBtn:             { flex: 1, padding: 9, borderWidth: 0.5, borderColor: C.border,
+                        borderRadius: 10, alignItems: 'center' },
+  sevText:            { fontSize: 12, color: C.muted },
+  textInput:          { backgroundColor: C.surface, borderRadius: 10, borderWidth: 0.5,
+                        borderColor: C.border, padding: 12, fontSize: 13, color: C.text },
+  notesInput:         { height: 80, textAlignVertical: 'top' },
+  gpsRow:             { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12, marginBottom: 4 },
+  gpsDot:             { width: 7, height: 7, borderRadius: 4 },
+  gpsText:            { fontSize: 11, color: C.muted },
+  submitBtn:          { backgroundColor: C.primary, borderRadius: 12, padding: 15,
+                        alignItems: 'center', marginTop: 16 },
+  submitDisabled:     { opacity: 0.6 },
+  submitText:         { color: '#fff', fontSize: 15, fontWeight: '600' },
+})
