@@ -99,7 +99,7 @@ export async function authRoutes(app: FastifyInstance) {
     const user = users[0]
 
     // Update last_login
-    await tdb.query(`UPDATE users SET last_login = now() WHERE id = $1`, [user.id])
+    await tdb.query(`UPDATE users SET last_login_at = now() WHERE id = $1`, [user.id])
 
     // Sign JWT with tenant context
     const token = app.jwt.sign({
