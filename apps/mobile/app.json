@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "GHMC Campaign",
+    "slug": "ghmc-campaign",
+    "version": "1.0.0",
+    "sdkVersion": "54.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#1D9E75"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.ghmc.campaign"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#1D9E75"
+      },
+      "package": "com.ghmc.campaign"
+    }
+  }
+}

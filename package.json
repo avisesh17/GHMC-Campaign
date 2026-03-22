@@ -1,13 +1,14 @@
 {
-  "name": "ghmc-campaign",
+  "name": "ghmc-election-app",
   "version": "1.0.0",
   "private": true,
-  "workspaces": ["packages/*", "apps/*"],
+  "workspaces": [
+    "packages/api",
+    "packages/db"
+  ],
   "scripts": {
-    "dev:api": "cd packages/api && npm run dev",
-    "dev:web": "cd apps/web && npm run dev",
-    "test": "cd packages/api && npm test",
-    "db:migrate": "cd packages/db && npm run migrate",
-    "db:seed": "cd packages/db && npm run seed"
+    "dev":   "npm run dev --workspace=packages/api",
+    "test":  "npm run test --workspace=packages/api",
+    "build": "npm run build --workspace=packages/api"
   }
 }

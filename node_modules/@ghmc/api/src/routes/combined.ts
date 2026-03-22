@@ -288,92 +288,194 @@ export async function taskRoutes(app: FastifyInstance) {
   })
 }
 
-// ─── imports.ts ───────────────────────────────────────────────
+// packages/api/src/routes/combined.ts
+// REPLACE the entire importRoutes function with this fixed version
+
 export async function importRoutes(app: FastifyInstance) {
+
+  // POST /api/imports/voters
+  // Called by tenant_owner or permitted ward_admin with a valid JWT
   app.post('/voters', async (request, reply) => {
-    // Verify import permission
-    if (request.userRole === 'ward_admin') {
+    const role     = request.userRole
+    const tenantId = request.tenantId
+    const schema   = request.schema
+    const userId   = request.userId
+    const tdb      = tenantDb(schema)
+
+    // ── FIX 2: tenant_owner always allowed; ward_admin needs allow_import flag
+    if (role === 'ward_admin') {
       const { rows } = await db.query(
         `SELECT allow_import FROM public.tenant_wards
-         WHERE tenant_id=$1 AND ward_id=$2`,
-        [request.tenantId, (request.user as any).assigned_ward_id]
+         WHERE tenant_id = $1 AND ward_id = $2`,
+        [tenantId, (request.user as any).assigned_ward_id]
       )
       if (!rows.length || !rows[0].allow_import) {
-        return reply.status(403).send({ error: 'Import not permitted for your account. Contact Super Admin.' })
+        return reply.status(403).send({
+          error: 'Import not permitted for your account. Contact your administrator.'
+        })
       }
-    } else if (!['tenant_owner'].includes(request.userRole)) {
-      return reply.status(403).send({ error: 'Import requires tenant_owner or permitted ward_admin role' })
+    } else if (role !== 'tenant_owner') {
+      return reply.status(403).send({
+        error: 'Only tenant_owner or permitted ward_admin can import voters.'
+      })
     }
 
+    // ── Parse uploaded file
     const data = await request.file()
-    if (!data) return reply.status(400).send({ error: 'No file uploaded' })
+    if (!data) return reply.status(400).send({ error: 'No file uploaded.' })
 
-    const XLSX = require('xlsx')
+    const XLSX  = require('xlsx')
     const buffer = await data.toBuffer()
-    const wb = XLSX.read(buffer)
-    const ws = wb.Sheets[wb.SheetNames[0]]
-    const rows: any[] = XLSX.utils.sheet_to_json(ws)
+    const wb    = XLSX.read(buffer, { type: 'buffer' })
+    const ws    = wb.Sheets[wb.SheetNames[0]]
+    const rows: any[] = XLSX.utils.sheet_to_json(ws, { defval: null })
 
-    const tdb = tenantDb(request.schema)
+    if (!rows.length) {
+      return reply.status(400).send({ error: 'File has no data rows.' })
+    }
 
-    // Create batch record
+    // ── Get ward_id from first row (all rows have same ward in this file)
+    const wardId = rows[0]['ward_id'] || rows[0]['Ward ID'] || null
+    if (!wardId) {
+      return reply.status(400).send({
+        error: 'ward_id column is required in the Excel file.'
+      })
+    }
+
+    // ── FIX 6: import_batches INSERT now includes ward_id
     const { rows: batch } = await tdb.query(
-      `INSERT INTO import_batches (filename, uploaded_by, total_rows, status)
-       VALUES ($1,$2,$3,'processing') RETURNING id`,
-      [data.filename, request.userId, rows.length]
+      `INSERT INTO import_batches
+         (filename, uploaded_by, ward_id, total_rows, status)
+       VALUES ($1, $2, $3, $4, 'processing')
+       RETURNING id`,
+      [data.filename, userId, wardId, rows.length]
     )
     const batchId = batch[0].id
 
-    let success = 0, errors: any[] = []
+    let success = 0
+    const errors: any[] = []
 
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i]
-      try {
-        await tdb.query(
-          `INSERT INTO voters (voter_id, full_name, father_name, age, gender,
-             phone, house_number, address, booth_id, ward_id, imported_batch_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,
-             (SELECT id FROM public.booths WHERE booth_number=$9 AND ward_id=$10),
-             $10, $11)
-           ON CONFLICT (voter_id) DO NOTHING`,
-          [
-            row['Voter ID'] || row['voter_id'],
-            row['Full Name'] || row['full_name'],
-            row['Father Name'] || row['father_name'] || null,
-            Number(row['Age'] || row['age']) || null,
-            row['Gender'] || row['gender'] || null,
-            row['Phone'] || row['phone'] || null,
-            row['House No'] || row['house_number'] || null,
-            row['Address'] || row['address'] || null,
-            row['Booth No'] || row['booth_number'],
-            row['Ward ID'] || row['ward_id'],
-            batchId
-          ]
+    // ── FIX 5: batch insert in chunks of 100 rows
+    const CHUNK = 100
+    for (let start = 0; start < rows.length; start += CHUNK) {
+      const chunk  = rows.slice(start, start + CHUNK)
+      const values: string[] = []
+      const params: any[]    = []
+      let   p = 1
+
+      for (const row of chunk) {
+        // ── FIX 4: use booth_id UUID directly from Excel (no sub-SELECT)
+        const boothId     = row['booth_id']      || row['Booth ID']      || null
+        const voterId     = row['voter_id']      || row['Voter ID']      || null
+        const fullName    = row['full_name']     || row['Full Name']     || null
+        const relationTyp = row['relation_type'] || row['Relation Type'] || null
+        const relationNam = row['relation_name'] || row['Relation Name'] || null
+        const fatherName  = row['father_name']   || row['Father Name']  || null
+        const age         = Number(row['age']    || row['Age'])          || null
+        const gender      = row['gender']        || row['Gender']        || null
+        const phone       = row['phone']         || row['Phone']        || null
+        const houseNo     = row['house_number']  || row['House No']     || null
+        const address     = row['address']       || row['Address']      || null
+        const serialNo    = Number(row['serial_no'] || row['Serial No']) || null
+        const rowWardId   = row['ward_id']       || row['Ward ID']      || wardId
+
+        if (!voterId || !fullName || !age || !gender || !rowWardId) {
+          errors.push({ row: start + chunk.indexOf(row) + 2,
+            reason: 'Missing required field (voter_id/full_name/age/gender/ward_id)',
+            voter_id: voterId })
+          continue
+        }
+
+        // ── FIX 3: correct column names + new columns added
+        values.push(
+          `($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++})`
         )
-        success++
+        params.push(
+          voterId,       // voter_id
+          fullName,      // full_name
+          fatherName,    // father_name
+          relationTyp,   // relation_type   ← FIX 3
+          relationNam,   // relation_name   ← FIX 3
+          age,           // age
+          gender,        // gender
+          phone,         // phone
+          houseNo,       // house_number
+          address,       // address
+          rowWardId,     // ward_id
+          boothId,       // booth_id        ← FIX 4 (UUID direct)
+          serialNo,      // serial_no       ← FIX 3
+          batchId,       // import_batch_id ← FIX 3 (correct column name)
+        )
+      }
+
+      if (!values.length) continue
+
+      try {
+        const result = await tdb.query(
+          `INSERT INTO voters
+             (voter_id, full_name, father_name, relation_type, relation_name,
+              age, gender, phone, house_number, address,
+              ward_id, booth_id, serial_no, import_batch_id)
+           VALUES ${values.join(',')}
+           ON CONFLICT (voter_id) DO UPDATE SET
+             full_name     = EXCLUDED.full_name,
+             age           = EXCLUDED.age,
+             ward_id       = EXCLUDED.ward_id,
+             booth_id      = EXCLUDED.booth_id,
+             updated_at    = NOW()`,
+          params
+        )
+        success += result.rowCount ?? chunk.length
       } catch (err: any) {
-        errors.push({ row: i + 2, reason: err.message, data: row })
+        errors.push({
+          rows: `${start + 1}–${start + chunk.length}`,
+          reason: err.message
+        })
       }
     }
 
+    // ── Update batch record with final counts
     await tdb.query(
-      `UPDATE import_batches SET success_rows=$1, error_rows=$2, error_log=$3, status='done'
-       WHERE id=$4`,
-      [success, errors.length, JSON.stringify(errors.slice(0,100)), batchId]
+      `UPDATE import_batches
+       SET success_rows = $1,
+           error_rows   = $2,
+           error_log    = $3,
+           status       = $4,
+           completed_at = NOW()
+       WHERE id = $5`,
+      [
+        success,
+        errors.length,
+        JSON.stringify(errors.slice(0, 100)),
+        errors.length === rows.length ? 'failed' : 'completed',
+        batchId
+      ]
     )
 
-    return reply.send({ batch_id: batchId, total: rows.length, success, errors: errors.length,
-      error_preview: errors.slice(0,5) })
+    return reply.send({
+      batch_id:      batchId,
+      total:         rows.length,
+      success,
+      errors:        errors.length,
+      error_preview: errors.slice(0, 5)
+    })
   })
 
+  // GET /api/imports/:id — poll batch status
   app.get('/:id', async (request, reply) => {
-    const { id } = request.params as any
-    const tdb = tenantDb(request.schema)
-    const { rows } = await tdb.query(`SELECT * FROM import_batches WHERE id=$1`,[id])
+    const { id }  = request.params as any
+    const tdb     = tenantDb(request.schema)
+    const { rows } = await tdb.query(
+      `SELECT id, filename, status, total_rows, success_rows,
+              error_rows, error_log, created_at, completed_at
+       FROM import_batches WHERE id = $1`,
+      [id]
+    )
     if (!rows.length) return reply.status(404).send({ error: 'Batch not found' })
     return reply.send({ batch: rows[0] })
   })
 }
+
 
 // ─── platform.ts ──────────────────────────────────────────────
 export async function platformRoutes(app: FastifyInstance) {
