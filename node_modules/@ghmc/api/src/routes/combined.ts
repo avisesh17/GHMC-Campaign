@@ -334,11 +334,18 @@ export async function importRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: 'File has no data rows.' })
     }
 
-    // ── Get ward_id from first row (all rows have same ward in this file)
-    const wardId = rows[0]['ward_id'] || rows[0]['Ward ID'] || null
+    // ── Get ward_id from tenant record (reliable, no xlsx parsing issues)
+    const { rows: tenantRows } = await db.query(
+      `SELECT ward_id FROM public.tenants WHERE id = $1`,
+      [tenantId]
+    )
+    const wardId = tenantRows[0]?.ward_id ||
+                   rows[0]?.['ward_id']   ||
+                   rows[0]?.['Ward ID']   ||
+                   null
     if (!wardId) {
       return reply.status(400).send({
-        error: 'ward_id column is required in the Excel file.'
+        error: 'No ward assigned to this campaign. Please contact the platform admin.'
       })
     }
 
